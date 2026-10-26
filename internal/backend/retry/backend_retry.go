@@ -22,7 +22,8 @@ type Backend struct {
 	Report         func(string, error, time.Duration)
 	Success        func(string, int)
 
-	failedLoads sync.Map
+	failedLoads          sync.Map
+	failedPermanentLoads sync.Map
 }
 
 // statically ensure that RetryBackend implements backend.Backend.
@@ -211,17 +212,36 @@ func (be *Backend) Load(ctx context.Context, h backend.Handle, length int, offse
 			return fmt.Errorf("circuit breaker open for file %v", h)
 		}
 	}
+	knownPermanentError := false
+	if v, ok := be.failedPermanentLoads.Load(key); ok {
+		if time.Since(v.(time.Time)) > failedLoadExpiry {
+			be.failedPermanentLoads.Delete(key)
+		} else {
+			knownPermanentError = true
+		}
+	}
 
 	err = be.retry(ctx, fmt.Sprintf("Load(%v, %v, %v)", h, length, offset),
 		func() error {
-			return be.Backend.Load(ctx, h, length, offset, consumer)
+			err := be.Backend.Load(ctx, h, length, offset, consumer)
+			if knownPermanentError && feature.Flag.Enabled(feature.BackendErrorRedesign) && be.IsPermanentError(err) {
+				// The initial load already exhausted the flaky-error allowance.
+				// Still attempt each range so valid parts of a truncated file remain readable.
+				return backoff.Permanent(err)
+			}
+			return err
 		})
 
-	if feature.Flag.Enabled(feature.BackendErrorRedesign) && err != nil && ctx.Err() == nil && !be.IsPermanentError(err) {
-		// We've exhausted the retries, the file is likely inaccessible. By excluding permanent
-		// errors, not found or truncated files are not recorded. Also ignore errors if the context
-		// was canceled.
-		be.failedLoads.LoadOrStore(key, time.Now())
+	if feature.Flag.Enabled(feature.BackendErrorRedesign) && err != nil && ctx.Err() == nil {
+		if be.IsPermanentError(err) {
+			if be.Backend.Properties().HasFlakyErrors {
+				be.failedPermanentLoads.LoadOrStore(key, time.Now())
+			}
+		} else {
+			// We've exhausted the retries, the file is likely inaccessible. Permanent errors
+			// must not open the circuit breaker: other ranges can still be readable.
+			be.failedLoads.LoadOrStore(key, time.Now())
+		}
 	}
 
 	return err

@@ -331,6 +331,90 @@ func TestBackendLoadNotExistsFlakyErrors(t *testing.T) {
 	testBackendLoadNotExists(t, true)
 }
 
+func TestBackendLoadRepeatedPermanentErrors(t *testing.T) {
+	TestFastRetries(t)
+	permanentError := errors.New("range outside truncated file")
+	transientError := errors.New("temporary transport failure")
+	attempts := 0
+	be := mock.NewBackend()
+	be.PropertiesFn = func() backend.Properties {
+		return backend.Properties{Connections: 2, HasFlakyErrors: true}
+	}
+	be.IsPermanentErrorFn = func(err error) bool {
+		return errors.Is(err, permanentError)
+	}
+	be.OpenReaderFn = func(_ context.Context, _ backend.Handle, _ int, offset int64) (io.ReadCloser, error) {
+		attempts++
+		if offset >= 10 {
+			return nil, permanentError
+		}
+		if offset == 1 && attempts == 1 {
+			return nil, transientError
+		}
+		return io.NopCloser(strings.NewReader("valid prefix")), nil
+	}
+	retryBackend := New(be, time.Second, nil, nil)
+	h := backend.Handle{Type: backend.PackFile, Name: "truncated"}
+	load := func(h backend.Handle, offset int64, wantAttempts int, wantError error) {
+		t.Helper()
+		attempts = 0
+		err := retryBackend.Load(context.Background(), h, 1, offset, func(rd io.Reader) error {
+			data, err := io.ReadAll(rd)
+			test.OK(t, err)
+			test.Equals(t, "valid prefix", string(data))
+			return nil
+		})
+		test.Equals(t, wantError, err)
+		test.Equals(t, wantAttempts, attempts)
+	}
+	// Preserve the initial allowance for a backend returning flaky errors.
+	load(h, 10, 5, permanentError)
+	// A different range of the same file must not repeat that allowance.
+	h.IsMetadata = true
+	load(h, 11, 1, permanentError)
+	// Valid ranges remain readable and transient failures still retry.
+	load(h, 0, 1, nil)
+	load(h, 1, 2, nil)
+	load(h, 12, 1, permanentError)
+	// The remembered error must not affect another file.
+	other := h
+	other.Name = "another"
+	load(other, 10, 5, permanentError)
+	// Expire the remembered failure without sleeping.
+	previousExpiry := failedLoadExpiry
+	failedLoadExpiry = -time.Nanosecond
+	t.Cleanup(func() { failedLoadExpiry = previousExpiry })
+	load(h, 10, 5, permanentError)
+}
+
+func TestBackendLoadRecoveredPermanentError(t *testing.T) {
+	TestFastRetries(t)
+	permanentError := errors.New("flaky not found")
+	attempts := 0
+	recoverOnRetry := true
+	be := mock.NewBackend()
+	be.PropertiesFn = func() backend.Properties {
+		return backend.Properties{Connections: 2, HasFlakyErrors: true}
+	}
+	be.IsPermanentErrorFn = func(err error) bool { return errors.Is(err, permanentError) }
+	be.OpenReaderFn = func(context.Context, backend.Handle, int, int64) (io.ReadCloser, error) {
+		attempts++
+		if recoverOnRetry && attempts > 1 {
+			return io.NopCloser(strings.NewReader("data")), nil
+		}
+		return nil, permanentError
+	}
+	retryBackend := New(be, time.Second, nil, nil)
+	consumer := func(io.Reader) error { return nil }
+	test.OK(t, retryBackend.Load(context.Background(), backend.Handle{}, 0, 0, consumer))
+	test.Equals(t, 2, attempts)
+	// A successful retry must not mark the file as persistently failing.
+	attempts = 0
+	recoverOnRetry = false
+	test.Equals(t, permanentError, retryBackend.Load(context.Background(), backend.Handle{}, 0, 0, consumer))
+	test.Equals(t, 5, attempts)
+}
+
 func TestBackendLoadCircuitBreaker(t *testing.T) {
 	// retry should not retry if the error matches IsPermanentError
 	notFound := errors.New("not found")

@@ -1,0 +1,8 @@
+Bugfix: Avoid repeated retries for truncated files with the rclone backend
+
+When repairing a truncated pack, restic retried every inaccessible part several
+times with the rclone backend. Restic now remembers a file's persistent failure
+for one hour and avoids repeating those retries for later permanent errors.
+Readable parts are still recovered, and temporary errors still retry normally.
+
+https://github.com/restic/restic/issues/5530
