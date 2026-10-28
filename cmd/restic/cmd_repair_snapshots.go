@@ -111,6 +111,8 @@ func handleUnreadableSnapshotFile(
 
 func runRepairSnapshots(ctx context.Context, gopts global.Options, opts RepairOptions, args []string, term ui.Terminal) error {
 	printer := progress.NewTerminalPrinter(false, gopts.Verbosity, term)
+	// Repair must inspect the repository copies, which may differ from the local cache.
+	gopts.NoCache = true
 
 	ctx, repo, unlock, err := openWithExclusiveLock(ctx, gopts, opts.DryRun, printer)
 	if err != nil {

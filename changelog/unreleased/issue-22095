@@ -1,0 +1,8 @@
+Bugfix: Make `repair snapshots` inspect repository data instead of a stale cache
+
+When a snapshot file in the repository was damaged but an intact copy remained
+in the local cache, `repair snapshots --forget` could report that no snapshots
+were modified. Restic now reads the repository copy when repairing snapshots,
+so it detects and removes damaged files as requested.
+
+https://github.com/restic/restic/issues/22095

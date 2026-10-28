@@ -173,3 +173,32 @@ func TestRepairSnapshotsBrokenSnapshots(t *testing.T) {
 	// verify that there are no snapshot errors
 	testRunCheck(t, env.gopts)
 }
+
+func TestRepairSnapshotsReadsDamagedRepositorySnapshot(t *testing.T) {
+	env, cleanup := withTestEnvironment(t)
+	defer cleanup()
+
+	testRunInit(t, env.gopts)
+	createRandomFile(t, env, "file", 128)
+	testRunBackup(t, "", []string{env.testdata}, BackupOptions{}, env.gopts)
+	id := testListSnapshots(t, env.gopts, 1)[0]
+	_ = testLoadSnapshot(t, env.gopts, id)
+
+	snapshotPath := filepath.Join(env.repo, "snapshots", id.String())
+	contents, err := os.ReadFile(snapshotPath)
+	rtest.OK(t, err)
+	contents[len(contents)/2] ^= 0xff
+	rtest.OK(t, os.Chmod(snapshotPath, 0o600))
+	rtest.OK(t, os.WriteFile(snapshotPath, contents, 0o600))
+
+	env.gopts.BackendTestHook = nil
+	opts := RepairOptions{Forget: true}
+	_, err = withCaptureStdout(t, env.gopts, func(ctx context.Context, gopts global.Options) error {
+		return runRepairSnapshots(ctx, gopts, opts, []string{id.String()}, gopts.Term)
+	})
+	rtest.OK(t, err)
+	_, err = os.Stat(snapshotPath)
+	if !os.IsNotExist(err) {
+		t.Fatalf("damaged repository snapshot was not removed: %v", err)
+	}
+}
