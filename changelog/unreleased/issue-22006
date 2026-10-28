@@ -1,0 +1,7 @@
+Bugfix: Allow root to mount a repository on a read-only filesystem
+
+The `mount` command rejected a mountpoint on a read-only filesystem even when
+run as root, although root can mount there. Restic now lets root attempt the
+mount while keeping the early write-access check for unprivileged users.
+
+https://github.com/restic/restic/issues/22006

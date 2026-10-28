@@ -234,9 +234,12 @@ func validateMountpoint(mountpoint string, gopts global.Options) error {
 		return errors.Fatal(fmt.Sprintf("mountpoint %s is not a directory", mountpoint))
 	}
 
-	err = unix.Access(mountpoint, unix.W_OK|unix.X_OK)
-	if err != nil {
-		return errors.Fatal(fmt.Sprintf("mountpoint %s is not writeable or not executable", mountpoint))
+	// Root can mount over a read-only filesystem; unprivileged FUSE mounts cannot.
+	if os.Geteuid() != 0 {
+		err = unix.Access(mountpoint, unix.W_OK|unix.X_OK)
+		if err != nil {
+			return errors.Fatal(fmt.Sprintf("mountpoint %s is not writeable or not executable", mountpoint))
+		}
 	}
 
 	// Refuse to mount onto (or under, or over) the local repository directory.
